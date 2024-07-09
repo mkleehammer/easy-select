@@ -1,23 +1,5 @@
 ;;; select-mode.el --- Easily select  -*- lexical-binding: t -*-
 
-;; Here I keep things a little less generic so others can generally pull my
-;; commits that deal with init.el and skip commits dealing with this file.
-;;
-;; - [ ] Optional overlay at original position.
-;; - [ ] List of region bounds so we can pop.
-;; - [ ]
-;;
-;; * Questions
-;;
-;; ** What benefits are there over easy-kill?
-;;
-;;    - The focus is mark instead of easy-kill & easy-mark.
-;;    - Numbers for expanding.
-;;    - Support for direction and expanding in the opposite direction.
-;;    - Easy setup and tear down for customization
-;;    - Hooks
-
-
 ;;; Commentary:
 ;;
 
@@ -34,11 +16,12 @@
   (let ((map (make-sparse-keymap)))
     (keymap-set map "l" #'select-mode--line-select)
     (keymap-set map "z" #'select-mode-undo)
+    (keymap-set map "+" #'select-mode-expand)
     (keymap-set map "q" #'select-mode-abort)
     (keymap-set map "RET" #'select-mode-exit)
 
-    (dotimes ((c 9))
-      (keymap-set map (number-to-string (+ 1 c))
+    (dotimes (c 9)
+      (keymap-set map (number-to-string (1+ c))
                   (lambda () (interactive) (select-mode--expand-to (+ 1 c)))))
 
     map))
@@ -107,12 +90,14 @@ All initial selections of \"things\" start from this point.")
   "Return to the previous `select-mode' selection and type."
   (interactive)
   (message "undo!")
-  (when-let ((el (pop select-mode--undo-list)))
+  (when-let ((el (pop select-mode--undo-list))
+             (type (car el)))
     (message "undo: %s" el)
     (setq select-mode--type (car el))
     (goto-char (nth 1 el))
     (push-mark (point) t t)
-    (goto-char (nth 2 el))))
+    (goto-char (nth 2 el))
+    (select-mode--update-overlays (select-mode--setting :next))))
 
 
 (defun select-mode--cleanup ()
@@ -218,11 +203,9 @@ If the type is already line, select the next line."
 (defun select-mode--set-type (type)
   (if (eq select-mode--type type)
       (select-mode-expand)
-    (let* ((pair (assq type select-mode--types))
-           (settings (cdr pair))
+    (let* ((settings (select-mode--settings type))
            (start (plist-get settings :start))
            (next (plist-get settings :next)))
-      (message "settings: %s %s" type settings)
       (select-mode--undo-push)
 
       (setq select-mode--type type)
@@ -272,40 +255,44 @@ If the type is already line, select the next line."
   ;; there.
   (select-mode--goto-generic (- count 1)))
 
-(defun select-mode--expand-to (count)
-  "Expand selection to the displayed number."
 
+(defun select-mode--settings (&optional type)
+  "Return the settings plist for `type' or the current type."
+  (cdr (assq (or type select-mode--type) select-mode--types)))
+
+
+(defun select-mode--setting (prop)
+  "Return the current setting `prop'."
+  (plist-get (select-mode--settings) prop))
+
+
+(defun select-mode--expand-to (count)
+  "Expand selection to the displayed number.
+
+This implements numbers 1-9, which are handled by generated lambdas."
   ;; If the type defines its own :goto function, defer to it.  Otherwise go to
   ;; the position of the given overlay.
+  (if (<= count (length select-mode--next))
+      (let* ((settings (select-mode--settings))
+             (nextfun (plist-get settings :next))
+             (gotofun (or (plist-get settings :gotox) #'select-mode--goto-generic)))
+        (select-mode--undo-push)
+        (funcall gotofun count)
+        (select-mode--update-overlays nextfun))))
 
-  (let* ((pair (assq select-mode--type select-mode--types))
-         (settings (cdr pair))
-         (nextfun (plist-get settings :next))
-         (gotofun (or (plist-get settings :goto)
-                      #'select-mode--goto-generic)))
-    (funcall gotofun count)
-
-    ;; Remove the first `count' items from -next.
-    (setq select-mode--next (nth count select-mode--next))
-    (select-mode--update-overlays nextfun)
-    )
-  )
 
 (defun select-mode--goto-generic (count)
-  "Move to the given overlay position and remove overlays."
+  "Move to the given overlay position and remove overlays.
 
-  (when (> (length select-mode--next) count)
-      (dotimes (i (- count 1))
-        (delete-overlay (pop select-mode--next)))
-      (goto-char (overlay-start (pop select-mode--next)))
-      ))
+This is used when a type does not supply its own :next function."
+  (if-let ((o (nth count select-mode--next)))
+    (goto-char (overlay-start o))))
 
 
 (defun select-mode-expand ()
   "Expand the selection by the current type and direction."
-  (when-let ((settings (plist-get select-mode--types select-mode--type)))
-      (message "settings: %s" settings)
-    ))
+  (interactive)
+  (select-mode--expand-to 1))
 
 
 (defun select-mode--delete-overlays ()
@@ -313,6 +300,7 @@ If the type is already line, select the next line."
       (dolist (o select-mode--next)
         (delete-overlay o))
       (setq select-mode--next nil))
+
 
 (defun select-mode--update-overlays (nextfun)
   "Update numbered overlays."
@@ -328,36 +316,44 @@ If the type is already line, select the next line."
   ;; on the text itself, not on the whole overlay.  (This is how meow handles
   ;; it.)
 
+  ;; NOTE: We could keep old items we calculated, but I'll save that
+  ;; optimization for later.  For now we'll recalculate all 9 from scratch.
+  (select-mode--delete-overlays)
+
   (save-excursion
-  (let ((l (length select-mode--next))
-        (start nil)
-        (o nil)
-        (next nil)
-        (text nil))
-    (while (and (< l 9)
-                (progn
-                  (setq start (point))
-                  (setq next (funcall nextfun (+ 1 l)))
-                  (message "next: count=%s pos=%s" (+ 1 l) next)
-                  (when (not (null next))
-                    (let ((o (make-overlay next (1+ next)))
-                          (before-newline (equal 10 (char-after)))
-                          (before-tab (equal 9 (char-after)))
-                          (n (number-to-string (1+ l))))
+    (let ((l (length select-mode--next))
+          (start nil)
+          (o nil)
+          (next nil)
+          (text nil))
+      (message "update l=%s" l)
+      (while (and (< l 9)
+                  (progn
+                    (setq start (point))
+                    (setq next (funcall nextfun (+ 1 l)))
+                    (message "next: count=%s pos=%s" (+ 1 l) next)
+                    (when (not (null next))
+                      (let ((o (make-overlay next (1+ next)))
+                            (before-newline (equal 10 (char-after)))
+                            (before-tab (equal 9 (char-after)))
+                            (n (number-to-string (1+ l))))
 
-                      (setq l (1+ l))
+                        (setq l (1+ l))
 
-                      (cond
-                       (before-newline
-                        (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\n")))
-                       (before-tab
-                        (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\t")))
-                       (t
-                        (overlay-put o 'display (propertize n 'face 'select-mode-number))))
+                        (cond
+                         (before-newline
+                          (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\n")))
+                         (before-tab
+                          (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\t")))
+                         (t
+                          (overlay-put o 'display (propertize n 'face 'select-mode-number))))
 
-                    (push o select-mode--next)
-                    t
-                    ))))))))
+                        (push o select-mode--next)
+                        t ; return true to keep while loop going
+                        )))))))
+  (setq select-mode--next (nreverse select-mode--next))
+  )
+
 
 (provide 'select-mode)
 
