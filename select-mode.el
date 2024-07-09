@@ -17,43 +17,68 @@
 ;;    - Easy setup and tear down for customization
 ;;    - Hooks
 
-(setq select-mode-map nil)
-(defvar select-mode-map (select-mode--make-keymap))
 
-(defun select-mode--make-keymap ()
+;;; Commentary:
+;;
+
+;;; Code:
+
+(defface select-mode-origin '((t (:inverse-video t :inherit error)))
+  "Faced used to highlight the origin.")
+
+(defface select-mode-number '((t (:inverse-video t :inherit warning)))
+  "Faced used to highlight numbers.")
+
+
+(defvar select-mode-map
   (let ((map (make-sparse-keymap)))
     (keymap-set map "l" #'select-mode--line-select)
     (keymap-set map "z" #'select-mode-undo)
     (keymap-set map "q" #'select-mode-abort)
     (keymap-set map "RET" #'select-mode-exit)
+
+    (dotimes ((c 9))
+      (keymap-set map (number-to-string (+ 1 c))
+                  (lambda () (interactive) (select-mode--expand-to (+ 1 c)))))
+
     map))
 
+
+(defvar select-mode--types
+  '((line . (
+             :start select-mode--line-start
+             :next  select-mode--line-next
+             :goto  select-mode--line-goto
+             ))))
+
 (defvar select-mode--type nil)
+
 (defvar select-mode--dir 'forward)
+
+(defvar select-mode--next nil
+  "List of up to next 9 overlays for numbering and expanding.")
 
 (defvar select-mode--undo-list nil
   "The list of previously selected regions used for undo.
 
 Each element is list containing (type beg end).")
 
-
 (defvar select-mode--origin nil
   "An overlay visually marking the original location of point.
 
 All initial selections of \"things\" start from this point.")
 
-(defface select-mode-origin '((t (:inverse-video t :inherit error)))
-  "Faced used to highlight the origin."
-  :group 'killing)
 
+(eval-when-compile (require 'cl-lib))
 
 (defun select-mode--setup ()
-  "Setup code called when entering the select hydra."
+  "Setup code called when entering select mode."
   (message "setup")
 
-  (setq select-mode--type 'sexp)
+  (setq select-mode--type nil)
   (setq select-mode--dir  'forward)
   (setq select-mode--undo-list nil)
+  (setq select-mode--next nil)
 
   (setq select-mode--origin (make-overlay (point) (1+ (point))))
   (overlay-put select-mode--origin 'face 'select-mode-origin)
@@ -63,21 +88,11 @@ All initial selections of \"things\" start from this point.")
     (put 'select-mode--command fun t))
 
   (map-keymap (lambda (_type fun)
-                (message "fun %s" fun)
                 (put 'select-mode--command fun t))
               select-mode-map)
 
   (add-hook 'pre-command-hook #'select-mode--hook-func)
-
-  (message "setup2: %s" select-mode--origin)
-
-  ;; Eventually I'd like either a variable for the initial type or a function
-  ;; run to perform the initial select.
-
-  (when-let ((bounds (bounds-of-thing-at-point 'sexp)))
-    (message "bounds: %s" bounds)
-      (push-mark (car bounds) t t)
-      (goto-char (cdr bounds))))
+  (select-mode--set-type 'line))
 
 
 (defun select-mode--undo-push ()
@@ -89,7 +104,7 @@ All initial selections of \"things\" start from this point.")
 
 
 (defun select-mode-undo ()
-  "Returns to the previous select-mode selection and type."
+  "Return to the previous `select-mode' selection and type."
   (interactive)
   (message "undo!")
   (when-let ((el (pop select-mode--undo-list)))
@@ -101,11 +116,11 @@ All initial selections of \"things\" start from this point.")
 
 
 (defun select-mode--cleanup ()
-  "Internal common cleanup"
+  "Internal common cleanup."
 
   (message "CLEANUP")
   (remove-hook 'pre-command-hook #'select-mode--hook-func)
-
+  (select-mode--delete-overlays)
   (and (overlayp select-mode--origin)
        (delete-overlay select-mode--origin))
   (setq select-mode--origin nil))
@@ -168,7 +183,7 @@ All initial selections of \"things\" start from this point.")
 (defun select-mode-exit ()
   "Exits select mode, leaving the current selection.
 
-This is safe to call it select-mode is not active."
+This is safe to call it `select-mode' is not active."
   (interactive)
   (message "exit")
   (if select-mode
@@ -177,7 +192,7 @@ This is safe to call it select-mode is not active."
 
 
 (defun select-mode-abort ()
-  "Exits select mode and returns point to its original position."
+  "Exits select mode and return point to its original position."
   (interactive)
   (message "abort: %s" select-mode)
 
@@ -197,15 +212,153 @@ This is safe to call it select-mode is not active."
 
 If the type is already line, select the next line."
   (interactive)
-  (if (eq select-mode--type 'line)
-      (select-mode--line-expand)
-    (select-mode--undo-push)
-    (setq select-mode--type 'line)
-    (goto-char (overlay-start select-mode--origin))
-    (beginning-of-line)
-    (push-mark (point) t t)
-    (forward-line 1)))
+  (select-mode--set-type 'line))
 
-(defun select-mode--line-expand ()
-  (select-mode--undo-push)
+
+(defun select-mode--set-type (type)
+  (if (eq select-mode--type type)
+      (select-mode-expand)
+    (let* ((pair (assq type select-mode--types))
+           (settings (cdr pair))
+           (start (plist-get settings :start))
+           (next (plist-get settings :next)))
+      (message "settings: %s %s" type settings)
+      (select-mode--undo-push)
+
+      (setq select-mode--type type)
+
+      ;; Return to the origin.
+      (goto-char (overlay-start select-mode--origin))
+
+      (funcall start)
+
+      (select-mode--delete-overlays)
+      (select-mode--update-overlays next)
+      )))
+
+
+(defun select-mode--line-start ()
+  "Select the line around point."
+  (beginning-of-line)
+  (push-mark (point) t t)
   (forward-line 1))
+
+
+(defun select-mode--line-next (count)
+  "Move to and return position of the next line number or nil if at end."
+
+  ;; This should only be called if -start has been called and we are already at
+  ;; the beginning of a line.
+  (cl-assert (bolp) t)
+
+  ;; We want to display the number at the beginning of the line it selects.
+  ;; When we select a line, we include the newline, which means point is
+  ;; actually at the beginning of the next line.  Therefore it count is 1, we
+  ;; are already at the start of the next line.
+  (if (= count 1)
+      (point)
+    (let ((start (point)))
+      (forward-line 1)
+      (and (bolp)
+           (/= start (point))
+           (point)))))
+
+
+(defun select-mode--line-goto (count)
+  "Move to expansion `count'."
+  ;; As noted in select-mode--line-next, we display the number at the beginning
+  ;; of the line we want to select, which means we want to move to the line
+  ;; *after* `count'.  If we have more than `count' overlays, we can just move
+  ;; there.
+  (select-mode--goto-generic (- count 1)))
+
+(defun select-mode--expand-to (count)
+  "Expand selection to the displayed number."
+
+  ;; If the type defines its own :goto function, defer to it.  Otherwise go to
+  ;; the position of the given overlay.
+
+  (let* ((pair (assq select-mode--type select-mode--types))
+         (settings (cdr pair))
+         (nextfun (plist-get settings :next))
+         (gotofun (or (plist-get settings :goto)
+                      #'select-mode--goto-generic)))
+    (funcall gotofun count)
+
+    ;; Remove the first `count' items from -next.
+    (setq select-mode--next (nth count select-mode--next))
+    (select-mode--update-overlays nextfun)
+    )
+  )
+
+(defun select-mode--goto-generic (count)
+  "Move to the given overlay position and remove overlays."
+
+  (when (> (length select-mode--next) count)
+      (dotimes (i (- count 1))
+        (delete-overlay (pop select-mode--next)))
+      (goto-char (overlay-start (pop select-mode--next)))
+      ))
+
+
+(defun select-mode-expand ()
+  "Expand the selection by the current type and direction."
+  (when-let ((settings (plist-get select-mode--types select-mode--type)))
+      (message "settings: %s" settings)
+    ))
+
+
+(defun select-mode--delete-overlays ()
+  "Delete overlays and set `select-mode--next' to nil."
+      (dolist (o select-mode--next)
+        (delete-overlay o))
+      (setq select-mode--next nil))
+
+(defun select-mode--update-overlays (nextfun)
+  "Update numbered overlays."
+
+  ;; Since we are displaying numbers, we *replace* the character we are
+  ;; covering.  If it is a newline, replacing it means there is no line break
+  ;; anymore and the line after it is joined to the current line.
+  ;;
+  ;; We have to add back the newline character after the number.  Same for tab.
+  ;;
+  ;; However, now we have *another* problem.  If you set the face for "1\n", it
+  ;; highlights the whole line.  For our special characters, we'll set the face
+  ;; on the text itself, not on the whole overlay.  (This is how meow handles
+  ;; it.)
+
+  (save-excursion
+  (let ((l (length select-mode--next))
+        (start nil)
+        (o nil)
+        (next nil)
+        (text nil))
+    (while (and (< l 9)
+                (progn
+                  (setq start (point))
+                  (setq next (funcall nextfun (+ 1 l)))
+                  (message "next: count=%s pos=%s" (+ 1 l) next)
+                  (when (not (null next))
+                    (let ((o (make-overlay next (1+ next)))
+                          (before-newline (equal 10 (char-after)))
+                          (before-tab (equal 9 (char-after)))
+                          (n (number-to-string (1+ l))))
+
+                      (setq l (1+ l))
+
+                      (cond
+                       (before-newline
+                        (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\n")))
+                       (before-tab
+                        (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\t")))
+                       (t
+                        (overlay-put o 'display (propertize n 'face 'select-mode-number))))
+
+                    (push o select-mode--next)
+                    t
+                    ))))))))
+
+(provide 'select-mode)
+
+;;; select-mode.el ends here
