@@ -23,7 +23,8 @@
 (defvar select-mode-map
   (let ((map (make-sparse-keymap)))
     (keymap-set map "q" #'select-mode-abort)
-    (keymap-set map "RET" #'select-mode-abort)
+    (keymap-set map "C-g" #'select-mode-abort)
+    (keymap-set map "RET" #'select-mode-exit)
     map))
 
 (defvar select-mode--origin nil
@@ -46,6 +47,17 @@ All initial selections of \"things\" start from this point.")
   (setq select-mode--origin (make-overlay (point) (1+ (point))))
   (overlay-put select-mode--origin 'face 'select-mode-origin)
 
+  ;; Add the property to our functions so the command hook won't abort.
+  (dolist (fun (list #'select-mode-copy-or-mark #'select-mode-exit #'select-mode-abort))
+    (put 'select-mode--command fun t))
+
+  (map-keymap (lambda (_type fun)
+                (message "fun %s" fun)
+                (put 'select-mode--command fun t))
+              select-mode-map)
+
+  (add-hook 'pre-command-hook #'select-mode--hook-func)
+
   (message "setup2: %s" select-mode--origin)
 
   ;; Eventually I'd like either a variable for the initial type or a function
@@ -57,36 +69,38 @@ All initial selections of \"things\" start from this point.")
       (goto-char (cdr bounds))))
 
 
-(defun select-mode-exit ()
-  "Exits select mode, leaving the current selection.
+(defun select-mode--cleanup ()
+  "Internal common cleanup"
 
-This is safe to call it select-mode is not active."
-  (interactive)
-  (message "exit")
+  (message "CLEANUP")
+  (remove-hook 'pre-command-hook #'select-mode--hook-func)
+
   (and (overlayp select-mode--origin)
        (delete-overlay select-mode--origin))
   (setq select-mode--origin nil))
 
 
-(defun select-mode-abort ()
-  "Turn off select-mode and remove the selection."
-  (interactive)
-  (message "abort: %s" select-mode--origin)
-  (goto-char (overlay-start select-mode--origin))
-  (deactivate-mark)
-  )
 
-;; (keymap-set global-map "C-M-w" 'select-mode-copy-or-mark)
+
+
 
 
 (define-minor-mode select-mode
   "Provides quick commands for selecting and manipulating the region."
-  :lighter "sel"
+  :lighter " sel"
   :keymap select-mode-map
 
+  ;; Reminder: the select-mode variable is toggled before this code is executed.
+  ;; If it is true, it was just toggled on.
+
+  ;; If we ran code to cleanup already, we'll deactivate the mark.  If it is
+  ;; activated, then the user probably manually turned off the mode which we'll
+  ;; treat like exit.  (I don't feel strongly about exit vs abort here.)
+
+  (message "MODE: %s" select-mode)
   (if select-mode
-      (select-mode--setup))
-  (select-mode-exit))
+      (select-mode--setup)
+    (select-mode--cleanup)))
 
 
 (defun select-mode-copy-or-mark ()
@@ -103,3 +117,50 @@ This is safe to call it select-mode is not active."
         (kill-ring-save (region-beginning) (region-end) t)
         (select-mode-exit))             ; safe to call when not on
     (select-mode)))
+
+
+(defun select-mode--hook-func ()
+  "Added to pre-command hook to exit mode if any unrecognized key is pressed."
+
+  ;; This functions is called before each command, which is each key,
+  ;; interactive command, etc.  If the command is not a select-mode command,
+  ;; quietly exit.
+  ;;
+  ;; When the mode is turned on, we add the select-mode--command property to
+  ;; each command in the keymap.  If we don't see this property, it isn't one of
+  ;; ours so exit.
+
+  (cond ((eq this-command #'keyboard-quit)
+         (select-mode-abort))
+        ((not (get 'select-mode--command this-command))
+         (message "UNKNOWN: %s" this-command)
+         (select-mode-exit))
+        (t (message "KEEP: %s" this-command))
+        ))
+
+
+(defun select-mode-exit ()
+  "Exits select mode, leaving the current selection.
+
+This is safe to call it select-mode is not active."
+  (interactive)
+  (message "exit")
+  (if select-mode
+      (select-mode 0)
+    (select-mode--cleanup)))
+
+
+(defun select-mode-abort ()
+  "Exits select mode and returns point to its original position."
+  (interactive)
+  (message "abort: %s" select-mode)
+
+  (if select-mode--origin
+      (goto-char (overlay-start select-mode--origin)))
+
+  (deactivate-mark)
+
+  ;; Careful - the mode itself calls abort
+  (if select-mode
+      (select-mode 0)
+    (select-mode--cleanup)))
