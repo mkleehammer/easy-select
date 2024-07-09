@@ -17,15 +17,25 @@
 ;;    - Easy setup and tear down for customization
 ;;    - Hooks
 
+(setq select-mode-map nil)
+(defvar select-mode-map (select-mode--make-keymap))
+
+(defun select-mode--make-keymap ()
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "l" #'select-mode--line-select)
+    (keymap-set map "z" #'select-mode-undo)
+    (keymap-set map "q" #'select-mode-abort)
+    (keymap-set map "RET" #'select-mode-exit)
+    map))
+
 (defvar select-mode--type nil)
 (defvar select-mode--dir 'forward)
 
-(defvar select-mode-map
-  (let ((map (make-sparse-keymap)))
-    (keymap-set map "q" #'select-mode-abort)
-    (keymap-set map "C-g" #'select-mode-abort)
-    (keymap-set map "RET" #'select-mode-exit)
-    map))
+(defvar select-mode--undo-list nil
+  "The list of previously selected regions used for undo.
+
+Each element is list containing (type beg end).")
+
 
 (defvar select-mode--origin nil
   "An overlay visually marking the original location of point.
@@ -43,6 +53,7 @@ All initial selections of \"things\" start from this point.")
 
   (setq select-mode--type 'sexp)
   (setq select-mode--dir  'forward)
+  (setq select-mode--undo-list nil)
 
   (setq select-mode--origin (make-overlay (point) (1+ (point))))
   (overlay-put select-mode--origin 'face 'select-mode-origin)
@@ -69,6 +80,26 @@ All initial selections of \"things\" start from this point.")
       (goto-char (cdr bounds))))
 
 
+(defun select-mode--undo-push ()
+  "Add the current region to the undo list."
+  (if (use-region-p)
+      (let ((el (list select-mode--type (region-beginning) (region-end))))
+        (unless (eq (last 'select-mode--undo-list) el)
+          (push el select-mode--undo-list)))))
+
+
+(defun select-mode-undo ()
+  "Returns to the previous select-mode selection and type."
+  (interactive)
+  (message "undo!")
+  (when-let ((el (pop select-mode--undo-list)))
+    (message "undo: %s" el)
+    (setq select-mode--type (car el))
+    (goto-char (nth 1 el))
+    (push-mark (point) t t)
+    (goto-char (nth 2 el))))
+
+
 (defun select-mode--cleanup ()
   "Internal common cleanup"
 
@@ -78,11 +109,6 @@ All initial selections of \"things\" start from this point.")
   (and (overlayp select-mode--origin)
        (delete-overlay select-mode--origin))
   (setq select-mode--origin nil))
-
-
-
-
-
 
 
 (define-minor-mode select-mode
@@ -164,3 +190,22 @@ This is safe to call it select-mode is not active."
   (if select-mode
       (select-mode 0)
     (select-mode--cleanup)))
+
+
+(defun select-mode--line-select ()
+  "Change type to line and select the line origin is on.
+
+If the type is already line, select the next line."
+  (interactive)
+  (if (eq select-mode--type 'line)
+      (select-mode--line-expand)
+    (select-mode--undo-push)
+    (setq select-mode--type 'line)
+    (goto-char (overlay-start select-mode--origin))
+    (beginning-of-line)
+    (push-mark (point) t t)
+    (forward-line 1)))
+
+(defun select-mode--line-expand ()
+  (select-mode--undo-push)
+  (forward-line 1))
