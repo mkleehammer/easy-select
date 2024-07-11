@@ -14,7 +14,10 @@
 
 (defvar select-mode-map
   (let ((map (make-sparse-keymap)))
+    (keymap-set map "x" #'select-mode--sexp-select)
+    (keymap-set map "w" #'select-mode--word-select)
     (keymap-set map "l" #'select-mode--line-select)
+    (keymap-set map "n" #'select-mode-toggle-numbers)
     (keymap-set map "z" #'select-mode-undo)
     (keymap-set map "+" #'select-mode-expand)
     (keymap-set map "q" #'select-mode-abort)
@@ -26,13 +29,26 @@
 
     map))
 
-
 (defvar select-mode--types
   '((line . (
              :start select-mode--line-start
              :next  select-mode--line-next
              :goto  select-mode--line-goto
+             ))
+    (word . (
+             :start select-mode--word-start
+             :next  select-mode--word-next
+             ))
+    (sexp . (
+             :start select-mode--sexp-start
+             :next  select-mode--sexp-next
              ))))
+
+
+(defvar select-mode--origin nil
+  "An overlay visually marking the original location of point.
+
+All initial selections of \"things\" start from this point.")
 
 (defvar select-mode--type nil)
 
@@ -45,11 +61,6 @@
   "The list of previously selected regions used for undo.
 
 Each element is list containing (type beg end).")
-
-(defvar select-mode--origin nil
-  "An overlay visually marking the original location of point.
-
-All initial selections of \"things\" start from this point.")
 
 
 (eval-when-compile (require 'cl-lib))
@@ -75,7 +86,7 @@ All initial selections of \"things\" start from this point.")
               select-mode-map)
 
   (add-hook 'pre-command-hook #'select-mode--hook-func)
-  (select-mode--set-type 'line))
+  (select-mode--set-type 'word))
 
 
 (defun select-mode--undo-push ()
@@ -193,11 +204,25 @@ This is safe to call it `select-mode' is not active."
 
 
 (defun select-mode--line-select ()
-  "Change type to line and select the line origin is on.
+  "Change type to line and select the line point is on.
 
 If the type is already line, select the next line."
   (interactive)
-  (select-mode--set-type 'line))
+  (select-mode--set-type 'sexp))
+
+(defun select-mode--sexp-select ()
+  "Change type to sexp and select the sexp at point.
+
+If the type is already sexp, select the next expression."
+  (interactive)
+  (select-mode--set-type 'sexp))
+
+(defun select-mode--word-select ()
+  "Change type to word and select the word at point.
+
+If the type is already word, select the next expression."
+  (interactive)
+  (select-mode--set-type 'word))
 
 
 (defun select-mode--set-type (type)
@@ -218,6 +243,65 @@ If the type is already line, select the next line."
       (select-mode--delete-overlays)
       (select-mode--update-overlays next)
       )))
+
+
+(defun select-mode--word-start ()
+  "Select the word around point."
+  (if-let ((bounds (bounds-of-thing-at-point 'word)))
+      (progn
+        (message "bounds: %s" bounds)
+        (goto-char (car bounds))
+        (push-mark (point) t t)
+        (goto-char (cdr bounds)))))
+
+(defun select-mode--word-next (count)
+  "Move to and return position of the next word number or nil if at end."
+
+  ;; Point is either on (count = 1, first call of this function) or immediately
+  ;; after.
+  ;;
+  ;; Move to the  of the next expression first.
+
+  (if-let ((current (bounds-of-thing-at-point 'word)))
+      (goto-char (cdr current)))
+
+  ;; We want our selections to be lenient.  In the text "end.  Next", the period
+  ;; is not a "word" character, so bounds-of-thing-at-point will never include
+  ;; it and we would never make to it Next using just thing functions.
+  ;; Therefore we need to manually search forward for the next start of a word.
+  (re-search-forward "[[:word:]]")
+
+  (when-let ((bounds (bounds-of-thing-at-point 'word)))
+    (goto-char (cdr bounds))
+    (point)))
+
+
+(defun select-mode--sexp-start ()
+  "Select the sexp around point."
+  (if-let ((bounds (bounds-of-thing-at-point 'sexp)))
+      (progn
+        (message "bounds: %s" bounds)
+        (goto-char (car bounds))
+        (push-mark (point) t t)
+        (goto-char (cdr bounds)))))
+
+(defun select-mode--sexp-next (count)
+  "Move to and return position of the next sexp number or nil if at end."
+
+  ;; Point is either on (count = 1, first call of this function) or immediately
+  ;; after.
+  ;;
+  ;; Move to the  of the next expression first.
+
+  (if-let ((current (bounds-of-thing-at-point 'sexp)))
+      (goto-char (cdr current)))
+
+  ;; TODO: This needs to find the next expression.
+  (re-search-forward "[^[:space:]]")
+
+  (when-let ((bounds (bounds-of-thing-at-point 'sexp)))
+    (goto-char (cdr bounds))
+    (point)))
 
 
 (defun select-mode--line-start ()
@@ -276,6 +360,7 @@ This implements numbers 1-9, which are handled by generated lambdas."
       (let* ((settings (select-mode--settings))
              (nextfun (plist-get settings :next))
              (gotofun (or (plist-get settings :gotox) #'select-mode--goto-generic)))
+        (cl-assert nextfun)
         (select-mode--undo-push)
         (funcall gotofun count)
         (select-mode--update-overlays nextfun))))
@@ -285,7 +370,7 @@ This implements numbers 1-9, which are handled by generated lambdas."
   "Move to the given overlay position and remove overlays.
 
 This is used when a type does not supply its own :next function."
-  (if-let ((o (nth count select-mode--next)))
+  (if-let ((o (nth (1- count) select-mode--next)))
     (goto-char (overlay-start o))))
 
 
@@ -322,11 +407,13 @@ This is used when a type does not supply its own :next function."
 
   (save-excursion
     (let ((l (length select-mode--next))
-          (start nil)
-          (o nil)
-          (next nil)
-          (text nil))
+          start
+          o next text
+          )
       (message "update l=%s" l)
+
+      ;; Call `nextfun' 9 times, or until it returns nil.
+
       (while (and (< l 9)
                   (progn
                     (setq start (point))
@@ -340,6 +427,7 @@ This is used when a type does not supply its own :next function."
 
                         (setq l (1+ l))
 
+                        (overlay-put o 'priority 999)
                         (cond
                          (before-newline
                           (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\n")))
@@ -354,6 +442,30 @@ This is used when a type does not supply its own :next function."
   (setq select-mode--next (nreverse select-mode--next))
   )
 
+(defun select-mode-toggle-numbers ()
+  "Toggle display of numbers by hiding the overlays."
+  (interactive)
+
+  ;; TODO: None of this works.  We're either going to have to simply delete them
+  ;; all and keep track of their boundaries somewhere else.
+
+  ;;  ;; If I remove an overlay, does it remove its position?
+  ;;  (let ((o (car select-mode--next)))
+  ;;    (message "before: %s" (overlay-start o))
+  ;;    (delete-overlay o)
+  ;;    (message "after: %s" (overlay-start o))
+  ;;    )
+
+
+  ;;  (if nil ; select-mode--next
+  ;;      (progn
+  ;;        (message "here: %s" (overlay-get (car select-mode--next) 'invisible))
+  ;;      (let* ((oldval (overlay-get (car select-mode--next) 'invisible))
+  ;;             (newval (not oldval)))
+  ;;        ;;  (message "old" oldval)
+  ;;        (dolist (o select-mode--next)
+  ;;          (overlay-put o 'invisible newval))))))
+)
 
 (provide 'select-mode)
 
