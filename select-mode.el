@@ -55,7 +55,14 @@ All initial selections of \"things\" start from this point.")
 (defvar select-mode--dir 'forward)
 
 (defvar select-mode--next nil
-  "List of up to next 9 overlays for numbering and expanding.")
+  "List of up to next 9 positions for numbering and expanding.")
+
+(defvar select-mode--overlays nil
+  "Overlays on the select-mode--next positions.
+
+There doesn't seem to be a good way to hide overlays since we
+replace text, so we delete them when not showing numbers.  This
+is an empty list when numbers are not shown.")
 
 (defvar select-mode--undo-list nil
   "The list of previously selected regions used for undo.
@@ -69,10 +76,13 @@ Each element is list containing (type beg end).")
   "Setup code called when entering select mode."
   (message "setup")
 
+  (cl-assert (null select-mode--overlays) "Overlays weren't deleted?")
+
   (setq select-mode--type nil)
   (setq select-mode--dir  'forward)
   (setq select-mode--undo-list nil)
   (setq select-mode--next nil)
+  (setq select-mode--overlays nil)
 
   (setq select-mode--origin (make-overlay (point) (1+ (point))))
   (overlay-put select-mode--origin 'face 'select-mode-origin)
@@ -108,7 +118,7 @@ Each element is list containing (type beg end).")
     (goto-char (nth 1 el))
     (push-mark (point) t t)
     (goto-char (nth 2 el))
-    (select-mode--update-overlays (select-mode--setting :next))))
+    (select-mode--update-numbers (select-mode--setting :next))))
 
 
 (defun select-mode--cleanup ()
@@ -170,10 +180,7 @@ Each element is list containing (type beg end).")
   (cond ((eq this-command #'keyboard-quit)
          (select-mode-abort))
         ((not (get 'select-mode--command this-command))
-         (message "UNKNOWN: %s" this-command)
-         (select-mode-exit))
-        (t (message "KEEP: %s" this-command))
-        ))
+         (select-mode-exit))))
 
 
 (defun select-mode-exit ()
@@ -241,7 +248,7 @@ If the type is already word, select the next expression."
       (funcall start)
 
       (select-mode--delete-overlays)
-      (select-mode--update-overlays next)
+      (select-mode--update-numbers next)
       )))
 
 
@@ -253,6 +260,7 @@ If the type is already word, select the next expression."
         (goto-char (car bounds))
         (push-mark (point) t t)
         (goto-char (cdr bounds)))))
+
 
 (defun select-mode--word-next (count)
   "Move to and return position of the next word number or nil if at end."
@@ -363,15 +371,15 @@ This implements numbers 1-9, which are handled by generated lambdas."
         (cl-assert nextfun)
         (select-mode--undo-push)
         (funcall gotofun count)
-        (select-mode--update-overlays nextfun))))
+        (select-mode--update-numbers nextfun))))
 
 
 (defun select-mode--goto-generic (count)
   "Move to the given overlay position and remove overlays.
 
 This is used when a type does not supply its own :next function."
-  (if-let ((o (nth (1- count) select-mode--next)))
-    (goto-char (overlay-start o))))
+  (if-let ((pos (nth (1- count) select-mode--next)))
+    (goto-char pos)))
 
 
 (defun select-mode-expand ()
@@ -381,20 +389,15 @@ This is used when a type does not supply its own :next function."
 
 
 (defun select-mode--delete-overlays ()
-  "Delete overlays and set `select-mode--next' to nil."
-      (dolist (o select-mode--next)
+  "Delete overlays and set `select-mode--overlays' to nil."
+      (dolist (o select-mode--overlays)
         (delete-overlay o))
-      (setq select-mode--next nil))
+      (setq select-mode--overlays nil))
 
 
-(defun select-mode--update-overlays (nextfun)
-  "Update numbered overlays."
+(defun select-mode--update-numbers (nextfun)
+  "Update number positions in select-mode--next and optionally creates overlays."
 
-  ;; Since we are displaying numbers, we *replace* the character we are
-  ;; covering.  If it is a newline, replacing it means there is no line break
-  ;; anymore and the line after it is joined to the current line.
-  ;;
-  ;; We have to add back the newline character after the number.  Same for tab.
   ;;
   ;; However, now we have *another* problem.  If you set the face for "1\n", it
   ;; highlights the whole line.  For our special characters, we'll set the face
@@ -404,68 +407,61 @@ This is used when a type does not supply its own :next function."
   ;; NOTE: We could keep old items we calculated, but I'll save that
   ;; optimization for later.  For now we'll recalculate all 9 from scratch.
   (select-mode--delete-overlays)
+  (setq select-mode--next nil)
 
+  ;; Call `nextfun' 9 times, or until it returns nil.
   (save-excursion
-    (let ((l (length select-mode--next))
-          start
-          o next text
-          )
-      (message "update l=%s" l)
-
-      ;; Call `nextfun' 9 times, or until it returns nil.
-
-      (while (and (< l 9)
+    (let ((count 0))
+      (while (and (< count 9)
                   (progn
-                    (setq start (point))
-                    (setq next (funcall nextfun (+ 1 l)))
-                    (message "next: count=%s pos=%s" (+ 1 l) next)
-                    (when (not (null next))
-                      (let ((o (make-overlay next (1+ next)))
-                            (before-newline (equal 10 (char-after)))
-                            (before-tab (equal 9 (char-after)))
-                            (n (number-to-string (1+ l))))
-
-                        (setq l (1+ l))
-
-                        (overlay-put o 'priority 999)
-                        (cond
-                         (before-newline
-                          (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\n")))
-                         (before-tab
-                          (overlay-put o 'display (concat (propertize n 'face 'select-mode-number) "\t")))
-                         (t
-                          (overlay-put o 'display (propertize n 'face 'select-mode-number))))
-
-                        (push o select-mode--next)
+                    (let ((pos (funcall nextfun (1+ count))))
+                      (when (not (null pos))
+                        (setq count (1+ count))
+                        (message "next: count=%s pos=%s" count pos)
+                        (push pos select-mode--next)
                         t ; return true to keep while loop going
                         )))))))
+
   (setq select-mode--next (nreverse select-mode--next))
-  )
+  (select-mode--make-overlays))
+
+
+(defun select-mode--make-overlays ()
+  "Make overlays for the positions in select-mode--next."
+  (cl-assert (null select-mode--overlays))
+
+  (let ((index 0))
+    (setq select-mode--overlays
+          (mapcar (lambda (pos)
+                    (let ((text (propertize (number-to-string (1+ index)) 'face 'select-mode-number))
+                          (char (char-to-string (char-after))))
+
+                      (setq index (1+ index))
+
+                      ;; Since we are displaying numbers, we *replace* the
+                      ;; character we are covering.  If it is a newline,
+                      ;; replacing it means there is no line break anymore and
+                      ;; the line after it is joined to the current line.
+                      ;; Similarly, replacing a tab char messes up display.  In
+                      ;; both cases, add back the character.
+                      (if (member char '("\n" "\t"))
+                          (setq text (concat text char)))
+
+                      (let ((o (make-overlay pos (1+ pos))))
+                        (overlay-put o 'display text)
+                        (overlay-put o 'priority 999)
+                        o)))
+                  select-mode--next))))
+
 
 (defun select-mode-toggle-numbers ()
   "Toggle display of numbers by hiding the overlays."
   (interactive)
 
-  ;; TODO: None of this works.  We're either going to have to simply delete them
-  ;; all and keep track of their boundaries somewhere else.
+  (if (null select-mode--overlays)
+      (select-mode--make-overlays)
+    (select-mode--delete-overlays)))
 
-  ;;  ;; If I remove an overlay, does it remove its position?
-  ;;  (let ((o (car select-mode--next)))
-  ;;    (message "before: %s" (overlay-start o))
-  ;;    (delete-overlay o)
-  ;;    (message "after: %s" (overlay-start o))
-  ;;    )
-
-
-  ;;  (if nil ; select-mode--next
-  ;;      (progn
-  ;;        (message "here: %s" (overlay-get (car select-mode--next) 'invisible))
-  ;;      (let* ((oldval (overlay-get (car select-mode--next) 'invisible))
-  ;;             (newval (not oldval)))
-  ;;        ;;  (message "old" oldval)
-  ;;        (dolist (o select-mode--next)
-  ;;          (overlay-put o 'invisible newval))))))
-)
 
 (provide 'select-mode)
 
