@@ -60,7 +60,6 @@ If nil, do not hide numbers unless toggled off using \"n\".")
     ("\"" . "\"")))
 
 
-
 (defun select-mode--make-keymap ()
 
   (let ((map (make-sparse-keymap)))
@@ -96,6 +95,10 @@ If nil, do not hide numbers unless toggled off using \"n\".")
     (keymap-set map "z" #'select-mode-undo)
     (keymap-set map "+" #'select-mode-expand)
     (keymap-set map "q" #'select-mode-abort)
+
+    (keymap-set map "C" #'select-mode-change-pair)
+    (keymap-set map "I" #'select-mode-insert-pair)
+
     (keymap-set map "RET" #'select-mode-exit)
 
     map))
@@ -810,6 +813,69 @@ be inferred."
   (let* ((a1 (abs p1))
          (a2 (abs (or p2 most-positive-fixnum))))
     (- (max a1 a2) (min a1 a2))))
+
+
+(defun select-mode-insert-pair (char)
+  "Insert a pair (around) the current region."
+  (interactive
+   (list (char-to-string (read-char "character: "))))
+
+  (let* ((pair (select-mode--make-pair char))
+         (left  (car pair))
+         (right (cdr pair))
+         (beg (region-beginning))
+         (end (region-end)))
+      (goto-char end)
+      (insert right)
+      (goto-char beg)
+      (insert left)
+
+      ;; We are probably showing numbers for words or expressions, which doesn't
+      ;; really make sense now that we've inserted a pair.  What options do we
+      ;; have?
+      ;;
+      ;; - switch to pair mode for the pair we just entered?
+      ;;  (select-mode--set-type 'pair right)
+      ;; - abort select-mode (unselect)?
+      (select-mode-exit)
+      (deactivate-mark)))
+
+(defun select-mode-change-pair ()
+  "Replace characters at end of region with a new pair."
+  (interactive)
+
+  (unless (use-region-p)
+    (error "No region"))
+
+  (let* ((ch (read-char "replace with: "))
+         (pair (select-mode--make-pair (char-to-string ch)))
+         (replace (not (eq ch ?\r))) ;; delete, not replace, if RET pressed
+         (beg (region-beginning))
+         (end (region-end))
+         (msg (if replace
+                 (format "Replaced %s %s with %s %s"
+                         (char-to-string (char-after beg))
+                         (char-to-string (char-before end))
+                         (car pair) (cdr pair))
+               (format "Delete [%s] [%s]"
+                       (char-to-string (char-after beg))
+                       (char-to-string (char-before end))))))
+
+    ;; Start with end in case we don't replace.  The position of the end
+    ;; character will change if we just delete the beginning character.
+    (goto-char end)
+    (delete-char -1)
+    (if replace
+        (insert (cdr pair)))
+    (goto-char beg)
+    (delete-char 1)
+    (if replace
+        (insert (car pair)))
+
+    (select-mode-exit)
+    (deactivate-mark)
+
+    (message msg)))
 
 
 ;;; select-mode.el ends here
