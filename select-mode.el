@@ -20,37 +20,56 @@ If nil, do not show numbers unless toggled on using \"n\".")
 If nil, do not hide numbers unless toggled off using \"n\".")
 
 
-(defvar select-mode-map
+(defvar select-mode--types
+  '((line . (
+             :key   "l"
+             :start select-mode--line-start
+             :next  select-mode--line-next
+             :goto  select-mode--line-goto
+             ))
+    (sentence . (
+             :key   "s"
+             :start select-mode--sentence-start
+             :next  select-mode--sentence-next
+             ))
+    (word . (
+             :key   "w"
+             :start select-mode--word-start
+             :next  select-mode--word-next
+             ))
+    (sexp . (
+             :key   "x"
+             :start select-mode--sexp-start
+             :next  select-mode--sexp-next
+             ))))
+
+(defvar select-mode-map (select-mode--make-keymap))
+
+
+(defun select-mode--make-keymap ()
+
   (let ((map (make-sparse-keymap)))
-    (keymap-set map "x" #'select-mode--sexp-select)
-    (keymap-set map "w" #'select-mode--word-select)
-    (keymap-set map "l" #'select-mode--line-select)
+
+    ;; Add a key for each type.
+    (dolist (pair select-mode--types)
+      (let ((type (car pair))
+            (key  (plist-get (cdr pair) :key)))
+        (keymap-set map key (lambda ()
+                              (interactive)
+                              (select-mode--set-type type)))))
+
+    ;; Add keys 1-9 for expanding the selection.
+    (dotimes (c 9)
+      (keymap-set map (number-to-string (1+ c))
+                  (lambda () (interactive) (select-mode--expand-to (+ 1 c)))))
+
     (keymap-set map "n" #'select-mode-toggle-numbers)
     (keymap-set map "z" #'select-mode-undo)
     (keymap-set map "+" #'select-mode-expand)
     (keymap-set map "q" #'select-mode-abort)
     (keymap-set map "RET" #'select-mode-exit)
 
-    (dotimes (c 9)
-      (keymap-set map (number-to-string (1+ c))
-                  (lambda () (interactive) (select-mode--expand-to (+ 1 c)))))
-
     map))
-
-(defvar select-mode--types
-  '((line . (
-             :start select-mode--line-start
-             :next  select-mode--line-next
-             :goto  select-mode--line-goto
-             ))
-    (word . (
-             :start select-mode--word-start
-             :next  select-mode--word-next
-             ))
-    (sexp . (
-             :start select-mode--sexp-start
-             :next  select-mode--sexp-next
-             ))))
 
 
 (defvar select-mode--origin nil
@@ -222,28 +241,6 @@ This is safe to call it `select-mode' is not active."
     (select-mode--cleanup)))
 
 
-(defun select-mode--line-select ()
-  "Change type to line and select the line point is on.
-
-If the type is already line, select the next line."
-  (interactive)
-  (select-mode--set-type 'line))
-
-(defun select-mode--sexp-select ()
-  "Change type to sexp and select the sexp at point.
-
-If the type is already sexp, select the next expression."
-  (interactive)
-  (select-mode--set-type 'sexp))
-
-(defun select-mode--word-select ()
-  "Change type to word and select the word at point.
-
-If the type is already word, select the next expression."
-  (interactive)
-  (select-mode--set-type 'word))
-
-
 (defun select-mode--set-type (type)
   "Change to TYPE and update display.
 
@@ -268,13 +265,41 @@ then we expand the selection, which is the same as pressing 1."
       (select-mode--update-numbers next))))
 
 
+(defun select-mode--sentence-start ()
+  "Select the sentence around point."
+
+  (when-let ((bounds (bounds-of-thing-at-point 'sentence)))
+    (goto-char (car bounds))
+    (push-mark (point) t t)
+    (goto-char (cdr bounds))))
+
+
+(defun select-mode--sentence-next (num)
+  "Return pos for overlay of sentence NUM."
+  ;; We should be on a sentence, so move past it to the next one.
+  (ignore num)
+  (when-let ((current (bounds-of-thing-at-point 'sentence)))
+    (goto-char (cdr current))
+    (re-search-forward "[^[:space:]]")
+    (when-let ((bounds (bounds-of-thing-at-point 'sentence)))
+      (goto-char (cdr bounds))
+      (point))))
+
+
 (defun select-mode--word-start ()
   "Select the word around point."
-  (if-let ((bounds (bounds-of-thing-at-point 'word)))
-      (progn
-        (goto-char (car bounds))
-        (push-mark (point) t t)
-        (goto-char (cdr bounds)))))
+
+  ;; If we're not on a word character, move to one.  I'm not sure what I want to
+  ;; do it we're on punctuation.  For now we'll simply move to a word character
+  ;; if possible.
+
+  (if (not (looking-at "[[:word:]]"))
+      (re-search-forward "[[:word:]]"))
+
+  (when-let ((bounds (bounds-of-thing-at-point 'word)))
+    (goto-char (car bounds))
+    (push-mark (point) t t)
+    (goto-char (cdr bounds))))
 
 
 (defun select-mode--word-next (num)
