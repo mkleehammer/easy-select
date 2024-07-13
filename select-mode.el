@@ -5,6 +5,11 @@
 
 ;;; Code:
 
+(eval-when-compile (require 'cl-lib))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Public configuration
+
 (defface select-mode-origin '((t (:inverse-video t :inherit error)))
   "Faced used to highlight the origin.")
 
@@ -18,6 +23,10 @@ If nil, do not show numbers unless toggled on using \"n\".")
 (defvar select-mode-hide-delay 0
   "If non-nil, time to wait in seconds before hiding numbers.
 If nil, do not hide numbers unless toggled off using \"n\".")
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Internal variables
 
 
 (defvar select-mode-initial-type 'sexp)
@@ -95,6 +104,8 @@ If nil, do not hide numbers unless toggled off using \"n\".")
     (keymap-set map "z" #'select-mode-undo)
     (keymap-set map "+" #'select-mode-expand)
     (keymap-set map "q" #'select-mode-abort)
+    (keymap-set map "-" #'select-mode-shrink)
+    (keymap-set map "i" #'select-mode-shrink)  ;; "inner"
 
     (keymap-set map "C" #'select-mode-change-pair)
     (keymap-set map "I" #'select-mode-insert-pair)
@@ -106,10 +117,12 @@ If nil, do not hide numbers unless toggled off using \"n\".")
 (defvar select-mode-map (select-mode--make-keymap))
 
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Session variables
 ;;
-;; "Session" variables that are used for reset when the mode is enabled
-;; and some when the type is changed.
 ;;
+;; Variables that are used for reset when the mode is enabled and some when the
+;; type is changed.
 
 (defvar select-mode--origin nil
   "An overlay visually marking the original location of point.
@@ -154,7 +167,114 @@ Each element is list containing (type beg end).")
 When nil, the timers are used.  When numbers are manually toggled
 on or off, this is set to the properties always or never.")
 
-(eval-when-compile (require 'cl-lib))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Mode & public commands
+
+
+(define-minor-mode select-mode
+  "Provides quick commands for selecting and manipulating the region."
+  :lighter " sel"
+  :keymap select-mode-map
+  (if select-mode
+      (select-mode--setup)
+    (select-mode--cleanup)))
+
+
+(defun select-mode-copy-or-mark ()
+  "Copy if region exists, otherwise start select-mode.
+
+This is designed to be bound to M-w."
+  (interactive)
+  ;; If there is a selection, copy it.  If the mode wasn't on, then it is a
+  ;; normal copy.  If it was on, turn it off and turn off the region.
+  (if (use-region-p)
+      ;; The region is set, so we're going to copy whether the mode was on or
+      ;; not.  If it was on, though, we want to exit and keep the current
+      ;; region, but deactivate the mark.  kill-ring-save will deactivate for
+      ;; us.
+      (progn
+        (kill-ring-save (region-beginning) (region-end) t)
+        (select-mode-exit))             ; safe to call when not on
+    (select-mode)))
+
+
+(defun select-mode-undo ()
+  "Return to the previous `select-mode' selection and type."
+  (interactive)
+  (when-let ((el (pop select-mode--undo-list))
+             (type (car el)))
+    (setq select-mode--type (car el))
+    (setq select-mode--key (nth 1 el))
+    (goto-char (nth 2 el))
+    (push-mark (point) t t)
+    (goto-char (nth 3 el))
+    (select-mode--update-numbers (select-mode--setting :next))))
+
+
+(defun select-mode-exit ()
+  "Exits select mode, leaving the current selection.
+
+This is safe to call it `select-mode' is not active."
+  (interactive)
+  (if select-mode
+      (select-mode 0)
+    (select-mode--cleanup)))
+
+
+(defun select-mode-abort ()
+  "Exits select mode and return point to its original position."
+  (interactive)
+  (if select-mode--origin
+      (goto-char (overlay-start select-mode--origin)))
+
+  (deactivate-mark)
+
+  ;; Careful - the mode itself calls abort
+  (if select-mode
+      (select-mode 0)
+    (select-mode--cleanup)))
+
+
+(defun select-mode-expand ()
+  "Expand the selection by the current type and direction."
+  (interactive)
+  (select-mode--expand-to 1))
+
+
+(defun select-mode-shrink ()
+  "Shrink the selection by 1 character on each end.
+
+This is useful for shrinking a quote selection, which includes
+the quotes, to only select the contents."
+  (interactive)
+  (let ((bounds (select-mode--shrink (cons (region-beginning) (region-end)))))
+    (if (< (car bounds) (cdr bounds))
+        (select-mode--mark-bounds bounds))))
+
+
+
+(defun select-mode--expand-to (num)
+  "Expand selection to the displayed number NUM.
+
+This implements numbers 1-9, which are handled by generated lambdas."
+
+  ;; This isn't interactive because we don't call it directly from a key.  We
+  ;; create an interactive lambda that calls this and passes NUM.
+
+  ;; If the type defines its own :goto function, defer to it.  Otherwise go to
+  ;; the position of the given overlay.
+  (if (<= num (length select-mode--next))
+      (let* ((settings (select-mode--settings))
+             (nextfun (plist-get settings :next))
+             (gotofun (or (plist-get settings :goto) #'select-mode--goto-generic)))
+        (cl-assert nextfun)
+        (select-mode--undo-push)
+        (funcall gotofun num)
+        (select-mode--update-numbers nextfun))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Housekeeping
 
 (defun select-mode--setup ()
   "Setup code called when entering select mode."
@@ -214,44 +334,6 @@ on or off, this is set to the properties always or never.")
           (push el select-mode--undo-list)))))
 
 
-(defun select-mode-undo ()
-  "Return to the previous `select-mode' selection and type."
-  (interactive)
-  (when-let ((el (pop select-mode--undo-list))
-             (type (car el)))
-    (setq select-mode--type (car el))
-    (setq select-mode--key (nth 1 el))
-    (goto-char (nth 2 el))
-    (push-mark (point) t t)
-    (goto-char (nth 3 el))
-    (select-mode--update-numbers (select-mode--setting :next))))
-
-
-(define-minor-mode select-mode
-  "Provides quick commands for selecting and manipulating the region."
-  :lighter " sel"
-  :keymap select-mode-map
-  (if select-mode
-      (select-mode--setup)
-    (select-mode--cleanup)))
-
-
-(defun select-mode-copy-or-mark ()
-  "Copy if region exists, otherwise start the select hydra."
-  (interactive)
-  ;; If there is a selection, copy it.  If the mode wasn't on, then it is a
-  ;; normal copy.  If it was on, turn it off and turn off the region.
-  (if (use-region-p)
-      ;; The region is set, so we're going to copy whether the mode was on or
-      ;; not.  If it was on, though, we want to exit and keep the current
-      ;; region, but deactivate the mark.  kill-ring-save will deactivate for
-      ;; us.
-      (progn
-        (kill-ring-save (region-beginning) (region-end) t)
-        (select-mode-exit))             ; safe to call when not on
-    (select-mode)))
-
-
 (defun select-mode--hook-func ()
   "Added to pre-command hook to exit mode if any unrecognized key is pressed."
 
@@ -269,28 +351,14 @@ on or off, this is set to the properties always or never.")
          (select-mode-exit))))
 
 
-(defun select-mode-exit ()
-  "Exits select mode, leaving the current selection.
-
-This is safe to call it `select-mode' is not active."
-  (interactive)
-  (if select-mode
-      (select-mode 0)
-    (select-mode--cleanup)))
+(defun select-mode--settings (&optional type)
+  "Return the settings plist for `TYPE' or the current type."
+  (cdr (assq (or type select-mode--type) select-mode--types)))
 
 
-(defun select-mode-abort ()
-  "Exits select mode and return point to its original position."
-  (interactive)
-  (if select-mode--origin
-      (goto-char (overlay-start select-mode--origin)))
-
-  (deactivate-mark)
-
-  ;; Careful - the mode itself calls abort
-  (if select-mode
-      (select-mode 0)
-    (select-mode--cleanup)))
+(defun select-mode--setting (prop)
+  "Return the current setting `PROP'."
+  (plist-get (select-mode--settings) prop))
 
 
 (defun select-mode--set-type (type &optional key)
@@ -328,6 +396,17 @@ then we expand the selection, which is the same as pressing 1."
       (select-mode--delete-overlays)
       (select-mode--update-numbers next))))
 
+
+(defun select-mode--mark-bounds (bounds)
+  "Internal function to set the active region to the cons cell BOUNDS."
+  (push-mark (point) t)
+  (goto-char (car bounds))
+  (push-mark (point) t t)
+  (goto-char (cdr bounds)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Sentence, word, sexp - thingatpt based types
 
 (defun select-mode--sentence-start ()
   "Select the sentence around point."
@@ -388,44 +467,6 @@ then we expand the selection, which is the same as pressing 1."
     (point)))
 
 
-(defun select-mode--pair-start ()
-  "Select the pair around point."
-  (let ((bounds (select-mode--get-pair-bounds select-mode--key 'auto)))
-    (message "mark pair: %s" bounds)
-    (select-mode--mark-bounds bounds)))
-
-(defun select-mode--pair-next (num)
-  ;; There should be a region if select-mode--pair-start found an initial pair.
-  ;; If so, move to the beginning of it and go up.
-  ;;
-  ;; One thing to watch for: if the key is a right char, the region will be
-  ;; inside the pair and we need to backup 2 characters.
-
-  (when (use-region-p)
-    (let* ((pair (select-mode--make-pair select-mode--key))
-           (left (cdr pair)))
-      (goto-char (region-beginning))
-      (message "char-at 1: %s" (char-to-string (char-after)))
-      (if (/= (char-after) (string-to-char left))
-          (backward-char))
-      (message "char-at 2: %s" (char-to-string (char-after)))
-      (backward-char)
-      (let ((bounds (select-mode--get-pair-bounds select-mode--key 'auto)))
-        (message "pair next: %s %s" num bounds)
-        (select-mode--mark-bounds bounds)
-        bounds  ;; return bounds
-        )))
-  )
-
-
-(defun select-mode--mark-bounds (bounds)
-  "Internal function to set the active region to the cons cell BOUNDS."
-  (push-mark (point) t)
-  (goto-char (car bounds))
-  (push-mark (point) t t)
-  (goto-char (cdr bounds)))
-
-
 (defun select-mode--sexp-start ()
   "Select the sexp around point."
   (if-let ((bounds (bounds-of-thing-at-point 'sexp)))
@@ -454,6 +495,9 @@ then we expand the selection, which is the same as pressing 1."
     (goto-char (cdr bounds))
     (point)))
 
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Line type
 
 (defun select-mode--line-start ()
   "Select the line around point."
@@ -498,31 +542,9 @@ then we expand the selection, which is the same as pressing 1."
     (forward-line 1)))
 
 
-(defun select-mode--settings (&optional type)
-  "Return the settings plist for `TYPE' or the current type."
-  (cdr (assq (or type select-mode--type) select-mode--types)))
 
-
-(defun select-mode--setting (prop)
-  "Return the current setting `PROP'."
-  (plist-get (select-mode--settings) prop))
-
-
-(defun select-mode--expand-to (num)
-  "Expand selection to the displayed number NUM.
-
-This implements numbers 1-9, which are handled by generated lambdas."
-  ;; If the type defines its own :goto function, defer to it.  Otherwise go to
-  ;; the position of the given overlay.
-  (if (<= num (length select-mode--next))
-      (let* ((settings (select-mode--settings))
-             (nextfun (plist-get settings :next))
-             (gotofun (or (plist-get settings :goto) #'select-mode--goto-generic)))
-        (cl-assert nextfun)
-        (select-mode--undo-push)
-        (funcall gotofun num)
-        (select-mode--update-numbers nextfun))))
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Number overlays
 
 (defun select-mode--goto-generic (num)
   "Move to the given overlay position and remove overlays.
@@ -532,12 +554,6 @@ This is used when a type does not supply its own :next function."
       (if (listp pos)
           (select-mode--mark-bounds pos)
         (goto-char pos))))
-
-
-(defun select-mode-expand ()
-  "Expand the selection by the current type and direction."
-  (interactive)
-  (select-mode--expand-to 1))
 
 
 (defun select-mode--delete-overlays ()
@@ -669,13 +685,41 @@ This is used when a type does not supply its own :next function."
          (select-mode--show-numbers))))
 
 
-(provide 'select-mode)
 
-
-;; PAIRS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Pair type
 ;;
 ;; I copied a lot of this from my surround package which I intend to replace
 ;; with this.  I didn't want any dependencies.
+
+
+(defun select-mode--pair-start ()
+  "Select the pair around point."
+  (let ((bounds (select-mode--get-pair-bounds select-mode--key 'auto)))
+    (message "mark pair: %s" bounds)
+    (select-mode--mark-bounds bounds)))
+
+(defun select-mode--pair-next (num)
+  ;; There should be a region if select-mode--pair-start found an initial pair.
+  ;; If so, move to the beginning of it and go up.
+  ;;
+  ;; One thing to watch for: if the key is a right char, the region will be
+  ;; inside the pair and we need to backup 2 characters.
+
+  (when (use-region-p)
+    (let* ((pair (select-mode--make-pair select-mode--key))
+           (left (cdr pair)))
+      (goto-char (region-beginning))
+      (message "char-at 1: %s" (char-to-string (char-after)))
+      (if (/= (char-after) (string-to-char left))
+          (backward-char))
+      (message "char-at 2: %s" (char-to-string (char-after)))
+      (backward-char)
+      (let ((bounds (select-mode--get-pair-bounds select-mode--key 'auto)))
+        (message "pair next: %s %s" num bounds)
+        (select-mode--mark-bounds bounds)
+        bounds  ;; return bounds
+        ))))
 
 
 (defun select-mode--make-pair (char)
@@ -702,6 +746,7 @@ right character in `select-mode-pairs'."
          (bounds (select-mode--pair-bounds left right)))
     (if (or (eq ends 'inner)
             (and (eq ends 'auto)
+                 (not (string= left right))
                  (string= char left)))
         (select-mode--shrink bounds)
       bounds)))
@@ -721,7 +766,9 @@ right character in `select-mode-pairs'."
   ;; We'll use a simpler technique.
   (if (string= left right)
       (cons (search-forward left nil nil -1)
-            (search-forward right nil nil 1))
+            (progn
+              (forward-char 1)
+              (search-forward right nil nil 1)))
     (cons
      (select-mode--find-char-nestable left right -1)
      (select-mode--find-char-nestable right left 1))))
@@ -877,5 +924,7 @@ be inferred."
 
     (message msg)))
 
+
+(provide 'select-mode)
 
 ;;; select-mode.el ends here

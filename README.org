@@ -1,0 +1,138 @@
+#+TITLE: select-mode
+
+An emacs mode for selecting with precision.
+
+This is a minor mode that that supplies commands for selecting and working with the selection
+(region).  It uses normal keys like "w" so it is implemented as a mior mode which only enabled
+for short while, then it disables itself automatically whenever you execute any command not in
+its keymap.
+
+* Usage
+
+** Pairs
+
+*** Selecting pairs and content
+
+    To select the parentheses in the example below, where the pipe (before the "three")
+    represents the cursor:
+
+      a = ["one", "two", |"three"]
+
+    Enable select-mode using M-w.  This starts the mode and selects the expression the cursor
+    is on.  Press ] (right bracket) to switch from expression mode to pair mode.  This will
+    select from the left bracket to the right bracket, including the brackets themselves.
+
+    To select /within/ the brackets, but not the brackets themselves, press the [ (left bracket).
+
+    For pairs with different left and right brackets, the left will always select inside the
+    pair (exclusive) and the right will select the pair and its contents (inclusive).
+
+*** To add a pair of characters around the selection
+
+    There is a key to do exactly this: "I".  Build up your selection using the other keys and
+    then press "I".  This will ask for the pair and you can enter either the left or right.
+    They behave the same.  The pair will be entered and select-mode will exit, leaving the
+    cursor at the first character inside the pair.
+
+    If this is inconvenient, you can use electric-pair mode.  If you have this enabled (which I
+    do), it will insert the right pair when you enter the left and will wrap a region when you
+    type in a pair character automatically.
+
+    If you use select-mode to select the region, pressing a pair character won't insert it,
+    though.  It will start selecting the pair instead.  Simply press RET once you've used
+    select-mode to build the selection you want.  This exits select-mode but keeps the region
+    selected.  You can then press the pair character to insert.
+
+    These two use the same number of characters ("I [" versus "RET [", for instance) but you
+    may find RET easier to press.
+
+    Tip: When inserting a pair, you are not limited to the pairs that select-mode knows about
+    and can select.  If you enter a character that is not in a registered pair, that character
+    will be added to the front and back.  For example, if you enter '*', an asterisk will be
+    added at the beginning and of the selection.
+
+*** Change a pair to a different pair
+
+    Imagine you want to change the square brackets in the following code to braces, and the
+    pipe is the position of the cursor (before "three").  (In Python, this would change the
+    data type from a list to a set.)
+
+       a = ["one", "two", |"three"]
+
+    You would do so like this:
+
+    1. Enable select-mode using M-w (or the key you bound)
+    2. Press ] to select the brackets.  You must use the right bracket.  Pressing the left will
+       select inside the brackets, but not the brackets themselves.
+    3. Press C to run the change pair command.
+    4. The command will ask for the replacement char, so enter { or }.  For the replacement it
+       doesn't matter which.
+
+    This will display "Replaced [ ] with { }" in the echo area and exit select-mode, leaving
+    the cursor on the first character after the left brace:
+
+       a = {|"one", "two", "three"}
+
+    Tip: The change command does not require that the characters on each end of the selection
+    be a pair.  You can press 'C' with any selection to change the outer characters to a pair.
+    If you selected the text xyzyx, the change command would replace the beginning and end 'x'
+    characters to whatever pair you choose.
+
+    Tip: The change command will accept any character as the replacement, not just a known
+    pair.  If a non-pair character is entered, it will simply use the same character at the
+    beginning and end.  If you selected the text xyzyx, used the change command and entered a
+    dash as the replacement, the text would become -yzy-.  This can be useful for surrounding
+    text with markup.
+
+** Quotes
+
+   The mode is also configured to recognize quotes, which use the pair commands but the opening
+   and closing characters are the same: single quotes, double quotes, and backticks.
+
+*** Selecting quotes
+
+   To select a pair of quotes, start with the cursor inside the quotes and press the quote
+   character.  For example, in the following the cursor is on the 'r' in "three".  Pressing
+   double quote would select the entire quoted string, including the quotes.
+
+      a = ["one", "two", "th|ree"]
+
+   The other types of pairs like parentheses have left and right characters, so we can use one
+   for inclusive (left) and one for exclusive (right).  Quotes use the same character so we
+   only have one behavior: inclusive.  It always selects the quote pair and its contents.
+
+   To select only the contents, first select the quotes then press 'i' or '-' to shrink the
+   selection by one character on each end.  (The 'i' is for "inner" like vi and I find it
+   easier to press than the minus, but use whichever makes the most sense to you.)
+
+*** Adding & Changing
+
+    Adding quotes around a selection works just like other pairs: make a selection with
+    select-mode and press 'I'.  It will ask you for the character to put on each side.
+
+    Changing existing pairs or quotes also works like other pairs.  Select the old pair, press
+    'C' to change.  You'll be asked for the replacement.  For example, to change the double
+    quotes around "three" in the following to single quotes:
+
+      a = ["one", "two", "th|ree"]
+
+    1. M-w to start select-mode
+    2. Press " to select the quotes ("three", including the quotes)
+    3. Press C to change the selected pair
+    4. Enter ' when asked for the replacement
+
+* Features / Motivation
+
+  Move point in the direction we're selecting.  Using the built-in mark-paragraph is difficult
+  when selecting more than fits in the window since point is at the top, but each new paragraph
+  is appended to the selection at the bottom /off the screen/.
+
+  Select pairs, such as {}, or the content of pairs.  Delete or change pairs easily.
+
+  Optional visual expansion using numbered overlays.  This can be enabled immediately, shown
+  after a delay, or toggled on and off manually.
+
+  Text based instead of tree-sitter based.  I am as excited about tree-sitter support in Emacs
+  as the next person, but a lot of my editing happens in comments or inside of strings.  This
+  includes different types of quotes, parentheses, sentences, etc.  Tree-sitter will identify
+  the entire comment or string, but doesn't usually support text-based constructs within them.

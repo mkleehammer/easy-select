@@ -1,0 +1,76 @@
+* Todo
+
+  - [X] Fix quotes - is not selecting up.
+  - [X] Word start should move to next word if not on one.
+  - [X] Fix line again.
+  - [ ] Eliminate need to move to point in 'next' functions?  Also consider renaming next?
+  - [X] Number display
+    - [X] Add timer to turn on display
+    - [X] Add timer to turn off display
+    - [X] Add session variable set by toggle which overrides those timers.
+    - [X] Use timers when updating numbers
+  - [-] Types
+    - [ ] symbol
+    - [ ] paragraph (not supported by thingatpt)
+    - [X] sentence
+    - [ ] function
+    - [X] pairs
+    - [X] quotes
+    - [ ] find & til
+  - [ ] Add direction
+  - [X] Add shrink to get contents of pairs
+  - [-] Pair ops
+    - [X] Insert
+    - [X] Change
+    - [ ] Delete (can use Change by pressing RET)
+  - [ ] Tab to normalize and indent rigidly
+  - [ ] Hydra like help
+    - [ ] Display
+    - [ ] Timer
+    - [ ] Toggle
+  - [ ] Readme
+    - [ ] Install
+    - [ ] Link to Github
+    - [ ] Recommended use with M-w
+    - [ ] Using the mode by itself
+
+** How do we interact with pairs?
+
+   Do we number following pairs, potentially useful for SQL values clauses?
+
+   For actual pairs, not just quotes, moving up / out is often useful.  Do we only support that
+   direction and number upwards pairs?
+
+   Do we support both as "directions": up, forward, backward?
+
+   Or, we could just press the same pair again so go up.  I like that.
+
+   Since up moves both ends of the region, we'd better support integers and bounds in -next.
+   The default go would need to handle them.
+
+   Are there built-in list utilities that can help?  I already have a bunch of code in surround
+   I can use.
+
+** Would an up direction be useful for expressions too?
+
+   I think this could be really good.  Maybe 'u' to force a quick up.  ; to toggle left and
+   right.  Or is 'u' an actual move up but ; cycles directions to get numbers?
+
+** Allow changing type w/o losing current selection?
+
+   Imagine wanting to select a couple of paragraphs, but then wanting to add a couple of words
+   at the end.  If you press 'w' to switch to words, it starts over.
+
+   It might be cool to press '+' and then a type letter like:
+
+     M-w p 3 +w 2
+
+   We could use C-u on any type letter to switch to that type but not reset:
+
+     M-w p 3 C-u w 2
+
+   The 2nd also would match something else I've been thinking about which is using C-u M-w to
+   start selecting adding onto the current selection instead of copying.
+
+   The second is pretty natural for Emacs.  Should we implement '+' anyway?  Both?  Not
+   implement + to help new users get used to C-u?
