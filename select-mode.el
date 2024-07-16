@@ -198,16 +198,20 @@ This is designed to be bound to M-w."
     (select-mode)))
 
 
-(defun select-mode-kill-or-line ()
+(defun select-mode-kill-or-line (arg)
   "Kill region if set; kill line otherwise.
 
 This is designed to be bound to C-w."
   ;; This is, of course, the behavior of the whole-line-or-region mode, but it
   ;; interferes with M-w.
-  (interactive)
+  (interactive "p")
   (select-mode-exit)
-  (if (not (use-region-p))
-      (select-mode--line-start))
+
+  (when (not (use-region-p))
+    (beginning-of-line)
+    (push-mark (point) t t)
+    (forward-line arg))
+
   (kill-region (region-beginning) (region-end) t))
 
 
